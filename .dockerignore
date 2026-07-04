@@ -1,0 +1,8 @@
+node_modules
+.vercel
+.git
+server.out.log
+server.err.log
+npm-debug.log
+uploads/*
+data/mail-outbox.json
