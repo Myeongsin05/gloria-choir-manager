@@ -1,0 +1,14 @@
+services:
+  choir-asset-system:
+    build: .
+    image: choir-asset-system:latest
+    container_name: choir-asset-system
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/app/data
+      - ./uploads:/app/uploads
