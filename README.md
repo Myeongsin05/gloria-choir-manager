@@ -64,8 +64,7 @@ gloria-choir-manager/
 ├─ vercel.json
 ├─ data/
 ├─ uploads/
-├─ docs/
-└─ DEPLOY_SERVER.md
+└─ docs/
 ```
 
 ## 로컬 실행
@@ -136,8 +135,6 @@ docker compose down
 
 서버 배포는 Docker Compose 방식을 권장합니다.
 
-자세한 절차는 [DEPLOY_SERVER.md](./DEPLOY_SERVER.md)를 참고하세요.
-
 기본 흐름:
 
 ```bash
@@ -157,8 +154,10 @@ curl http://localhost:3000
 브라우저 접속 예:
 
 ```text
-http://aiteam.chanuk.theworkpc.com:3000
+http://서버주소:3000
 ```
+
+실제 서버 주소, SSH 계정, 방화벽 규칙, 운영 비밀번호 같은 정보는 공개 저장소에 올리지 말고 개인 배포 문서나 안전한 비밀 관리 도구에 따로 보관하세요.
 
 ## 데이터 보존
 

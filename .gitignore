@@ -14,3 +14,7 @@ data/*.json
 
 github-upload/
 gloria-choir-manager-github-upload.zip
+
+# private deployment notes
+DEPLOY_SERVER.md
+SERVER_DEPLOYMENT.md
