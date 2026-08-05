@@ -64,8 +64,11 @@ gloria-choir-manager/
 ├─ vercel.json
 ├─ data/
 ├─ uploads/
+├─ db/
 └─ docs/
 ```
+
+DB 전환 설계는 [docs/DATABASE_SCHEMA.md](docs/DATABASE_SCHEMA.md)와 [db/schema.sql](db/schema.sql)에 정리되어 있습니다.
 
 ## 로컬 실행
 
