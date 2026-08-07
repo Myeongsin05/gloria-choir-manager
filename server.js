@@ -1,4 +1,4 @@
-const crypto = require("crypto");
+﻿const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const express = require("express");
@@ -11,31 +11,24 @@ const DATA_DIR = path.join(RUNTIME_ROOT, "data");
 const UPLOAD_DIR = path.join(RUNTIME_ROOT, "uploads");
 const STORE_PATH = path.join(DATA_DIR, "store.json");
 const USERS_PATH = path.join(DATA_DIR, "users.json");
+const PERMISSIONS_PATH = path.join(DATA_DIR, "permissions.json");
 const OUTBOX_PATH = path.join(DATA_DIR, "mail-outbox.json");
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
-const permissions = {
-  director: {
-    label: "지휘자",
-    hint: "모든 관리 기능을 사용할 수 있습니다.",
+const defaultPermissions = {
+  officer: {
+    label: "임원",
+    hint: "악보관리와 찬양집관리, 권한 관리 기능을 사용할 수 있습니다.",
     manageScores: true,
     manageBooks: true,
     manageHistory: true,
     managePermissions: true,
   },
-  officer: {
-    label: "임원",
-    hint: "악보, 찬양집, 이력 관리를 사용할 수 있습니다.",
-    manageScores: true,
-    manageBooks: true,
-    manageHistory: true,
-    managePermissions: false,
-  },
   member: {
     label: "우리 찬양대원",
-    hint: "이번 주 찬양곡과 공개된 악보, 미리 듣기를 확인할 수 있습니다.",
+    hint: "이번 주와 다음 주 찬양곡 정보를 확인할 수 있습니다.",
     manageScores: false,
     manageBooks: false,
     manageHistory: false,
@@ -52,8 +45,7 @@ const permissions = {
 };
 
 const defaultUsers = [
-  { id: "u-director", name: "김지휘", email: "director@choir.local", password: "choir1234", role: "director" },
-  { id: "u-officer", name: "김선교", email: "officer@choir.local", password: "choir1234", role: "officer" },
+  { id: "u-officer", name: "김임원", email: "officer@choir.local", password: "choir1234", role: "officer" },
   { id: "u-member", name: "박대원", email: "member@choir.local", password: "choir1234", role: "member" },
   { id: "u-guest", name: "이방문", email: "guest@choir.local", password: "choir1234", role: "guest" },
 ];
@@ -81,9 +73,9 @@ const demoStore = {
       date: "2026-07-12",
       service: "주일 오후 찬양",
       weekSlot: "next",
-      bookTitle: "새찬송가 합창 편곡집",
+      bookTitle: "새찬양 합창곡집",
       page: "64",
-      part: "앙상블",
+      part: "혼성4부",
       file: "grace-ensemble.pdf",
       fileUrl: "",
       version: "v1.1",
@@ -93,44 +85,33 @@ const demoStore = {
   ],
   books: [
     {
-      id: "book-001",
+      code: "JASG-42",
       title: "중앙성가 42집",
       stock: 18,
       threshold: 5,
-      songs: ["은혜", "주 사랑이 나를 숨쉬게 해", "기뻐하며 왕께"],
+      songs: [
+        { seq: "001", title: "주 하나님 지으신 모든 세계", page: "128", preview: "https://www.youtube.com/watch?v=Cc0QVWzCv9k" },
+        { seq: "002", title: "주의 사랑", page: "", preview: "" },
+        { seq: "003", title: "기뻐하며 찬양", page: "", preview: "" },
+      ],
     },
     {
-      id: "book-002",
-      title: "새찬송가 합창 편곡집",
+      code: "NEW-CHOIR",
+      title: "새찬양 합창곡집",
       stock: 4,
       threshold: 5,
-      songs: ["내 주를 가까이", "샘물과 같은 보혈", "참 아름다워라"],
+      songs: [
+        { seq: "001", title: "은혜 아니면", page: "64", preview: "https://www.youtube.com/" },
+        { seq: "002", title: "내 주를 가까이", page: "", preview: "" },
+        { seq: "003", title: "참 아름다워라", page: "", preview: "" },
+      ],
     },
   ],
   history: [
-    {
-      id: "history-001",
-      title: "은혜 아니면",
-      date: "2026-06-28",
-      service: "주일 2부 예배",
-      media: "https://www.youtube.com/",
-    },
-    {
-      id: "history-002",
-      title: "주 하나님 지으신 모든 세계",
-      date: "2026-06-21",
-      service: "주일 3부 예배",
-      media: "",
-    },
+    { id: "history-001", title: "은혜 아니면", date: "2026-06-28", service: "주일 2부 예배", media: "https://www.youtube.com/" },
+    { id: "history-002", title: "주 하나님 지으신 모든 세계", date: "2026-06-21", service: "주일 3부 예배", media: "" },
   ],
-  logs: [
-    {
-      id: "log-001",
-      at: new Date().toISOString(),
-      actor: "시스템",
-      action: "로컬 서버 데모 데이터가 준비되었습니다.",
-    },
-  ],
+  logs: [{ id: "log-001", at: new Date().toISOString(), actor: "시스템", action: "로컬 서버 데모 데이터가 준비되었습니다." }],
 };
 
 const sessions = new Map();
@@ -145,15 +126,65 @@ function writeJson(filePath, value) {
 }
 
 function readStore() {
-  return readJson(STORE_PATH, demoStore);
+  const store = readJson(STORE_PATH, demoStore);
+  store.books = (store.books || []).map(normalizeBook);
+  return store;
 }
 
 function writeStore(store) {
   writeJson(STORE_PATH, store);
 }
 
+function normalizeBook(book) {
+  const code = String(book.code || book.id || "").trim();
+  return {
+    ...book,
+    code,
+    id: code,
+    songs: (book.songs || []).map((song, index) => normalizeBookSong(song, index)),
+  };
+}
+
+function normalizeBookSong(song, index) {
+  if (typeof song === "string") {
+    return { seq: String(index + 1).padStart(3, "0"), title: song, page: "", preview: "" };
+  }
+  return {
+    seq: String(song.seq || index + 1).trim(),
+    title: String(song.title || song.name || "").trim(),
+    page: String(song.page || "").trim(),
+    preview: String(song.preview || "").trim(),
+  };
+}
+
+function findBook(store, code) {
+  return store.books.find((item) => item.code === code || item.id === code);
+}
+
+function readPermissions() {
+  return readJson(PERMISSIONS_PATH, defaultPermissions);
+}
+
+function writePermissions(permissions) {
+  writeJson(PERMISSIONS_PATH, permissions);
+}
+
 function readUsers() {
-  return readJson(USERS_PATH, defaultUsers);
+  const users = readJson(USERS_PATH, defaultUsers);
+  const permissions = readPermissions();
+  let changed = false;
+  const normalized = users
+    .filter((user) => user.email !== "director@choir.local")
+    .map((user) => {
+      if (user.role === "director" || !permissions[user.role]) {
+        changed = true;
+        return { ...user, role: "officer" };
+      }
+      return user;
+    });
+  if (normalized.length !== users.length) changed = true;
+  if (changed) writeUsers(normalized);
+  return normalized;
 }
 
 function writeUsers(users) {
@@ -169,10 +200,12 @@ function writeOutbox(messages) {
 }
 
 function addLog(store, user, action) {
+  const permissions = readPermissions();
+  const role = user && permissions[user.role] ? user.role : "officer";
   store.logs.unshift({
     id: crypto.randomUUID(),
     at: new Date().toISOString(),
-    actor: user ? `${user.name} ${permissions[user.role].label}` : "시스템",
+    actor: user ? `${user.name} ${permissions[role].label}` : "시스템",
     action,
   });
   store.logs = store.logs.slice(0, 80);
@@ -192,13 +225,9 @@ function parseCookies(req) {
 }
 
 function publicUser(user) {
-  return {
-    id: user.id,
-    name: user.name,
-    email: user.email,
-    role: user.role,
-    permissions: permissions[user.role],
-  };
+  const permissions = readPermissions();
+  const role = permissions[user.role] ? user.role : "officer";
+  return { id: user.id, name: user.name, email: user.email, role, permissions: permissions[role] };
 }
 
 function requireAuth(req, res, next) {
@@ -212,17 +241,15 @@ function requireAuth(req, res, next) {
 
 function requirePermission(permission) {
   return (req, res, next) => {
-    if (!permissions[req.user.role][permission]) {
-      return res.status(403).json({ error: "현재 역할에는 권한이 없습니다." });
-    }
+    const permissions = readPermissions();
+    if (!permissions[req.user.role]?.[permission]) return res.status(403).json({ error: "현재 역할에는 권한이 없습니다." });
     next();
   };
 }
 
 function canAccessScore(user, score) {
   if (user.role === "guest") return score.access === "all";
-  if (score.access === "leaders") return user.role === "director" || user.role === "officer";
-  if (score.access === "director") return user.role === "director";
+  if (score.access === "leaders" || score.access === "director") return user.role === "officer";
   return true;
 }
 
@@ -235,9 +262,9 @@ function recordPasswordMail(user, temporaryPassword) {
   outbox.unshift({
     id: crypto.randomUUID(),
     to: user.email,
-    subject: "[찬양대 자산실] 임시 비밀번호 안내",
+    subject: "[찬양대 자산함] 임시 비밀번호 안내",
     temporaryPassword,
-    body: `${user.name}님, 임시 비밀번호는 ${temporaryPassword} 입니다. 로그인 후 비밀번호를 변경해 주세요.`,
+    body: `${user.name}님의 임시 비밀번호는 ${temporaryPassword} 입니다. 로그인 후 비밀번호를 변경해주세요.`,
     at: new Date().toISOString(),
     delivery: "local-outbox",
   });
@@ -247,10 +274,7 @@ function recordPasswordMail(user, temporaryPassword) {
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, UPLOAD_DIR),
   filename: (req, file, cb) => {
-    const safeBase = path
-      .basename(file.originalname, path.extname(file.originalname))
-      .replace(/[^a-zA-Z0-9가-힣_-]/g, "_")
-      .slice(0, 80);
+    const safeBase = path.basename(file.originalname, path.extname(file.originalname)).replace(/[^a-zA-Z0-9가-힣_-]/g, "_").slice(0, 80);
     cb(null, `${Date.now()}-${safeBase}${path.extname(file.originalname).toLowerCase()}`);
   },
 });
@@ -258,10 +282,7 @@ const storage = multer.diskStorage({
 const upload = multer({
   storage,
   limits: { fileSize: 30 * 1024 * 1024 },
-  fileFilter: (req, file, cb) => {
-    const allowed = [".pdf", ".jpg", ".jpeg", ".png"];
-    cb(null, allowed.includes(path.extname(file.originalname).toLowerCase()));
-  },
+  fileFilter: (req, file, cb) => cb(null, [".pdf", ".jpg", ".jpeg", ".png"].includes(path.extname(file.originalname).toLowerCase())),
 });
 
 const app = express();
@@ -273,18 +294,8 @@ app.post("/api/login", (req, res) => {
   const email = String(req.body.email || "").trim().toLowerCase();
   const password = String(req.body.password || "");
   const user = readUsers().find((item) => item.email.toLowerCase() === email);
-  if (!user) {
-    return res.status(401).json({
-      code: "LOGIN_EMAIL_NOT_FOUND",
-      error: "등록되지 않은 아이디입니다.",
-    });
-  }
-  if (user.password !== password) {
-    return res.status(401).json({
-      code: "LOGIN_PASSWORD_MISMATCH",
-      error: "비밀번호가 일치하지 않습니다.",
-    });
-  }
+  if (!user) return res.status(401).json({ code: "LOGIN_EMAIL_NOT_FOUND", error: "등록되지 않은 아이디입니다." });
+  if (user.password !== password) return res.status(401).json({ code: "LOGIN_PASSWORD_MISMATCH", error: "비밀번호가 일치하지 않습니다." });
   const sid = crypto.randomUUID();
   sessions.set(sid, user.id);
   res.setHeader("Set-Cookie", `sid=${encodeURIComponent(sid)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=28800`);
@@ -306,29 +317,19 @@ app.post("/api/password-reset", (req, res) => {
   const users = readUsers();
   const user = users.find((item) => item.email.toLowerCase() === email);
   if (!user) return res.status(404).json({ error: "등록된 이메일을 찾을 수 없습니다." });
-
   const temporaryPassword = createTemporaryPassword();
   user.password = temporaryPassword;
   writeUsers(users);
   recordPasswordMail(user, temporaryPassword);
-
   const store = readStore();
   addLog(store, user, "임시 비밀번호를 요청했습니다.");
   writeStore(store);
-
-  res.json({
-    ok: true,
-    message: "임시 비밀번호를 등록된 이메일로 전송했습니다.",
-    delivery: "local-outbox",
-  });
-});
-
-app.get("/api/me", requireAuth, (req, res) => {
-  res.json({ user: publicUser(req.user), permissions });
+  res.json({ ok: true, message: "임시 비밀번호를 등록된 이메일로 전송했습니다.", delivery: "local-outbox" });
 });
 
 app.get("/api/state", requireAuth, (req, res) => {
   const store = readStore();
+  const permissions = readPermissions();
   res.json({
     user: publicUser(req.user),
     permissions,
@@ -341,8 +342,9 @@ app.get("/api/state", requireAuth, (req, res) => {
 });
 
 app.patch("/api/users/:id/role", requireAuth, requirePermission("managePermissions"), (req, res) => {
+  const permissions = readPermissions();
   const nextRole = req.body.role;
-  if (!permissions[nextRole]) return res.status(400).json({ error: "알 수 없는 역할입니다." });
+  if (!permissions[nextRole]) return res.status(400).json({ error: "없는 역할입니다." });
   const users = readUsers();
   const target = users.find((item) => item.id === req.params.id);
   if (!target) return res.status(404).json({ error: "사용자를 찾을 수 없습니다." });
@@ -352,6 +354,46 @@ app.patch("/api/users/:id/role", requireAuth, requirePermission("managePermissio
   addLog(store, req.user, `${target.name} 사용자의 역할을 ${permissions[nextRole].label}(으)로 변경했습니다.`);
   writeStore(store);
   res.json({ user: publicUser(target) });
+});
+
+app.post("/api/users", requireAuth, requirePermission("managePermissions"), (req, res) => {
+  const permissions = readPermissions();
+  const name = String(req.body.name || "").trim();
+  const email = String(req.body.email || "").trim().toLowerCase();
+  const password = String(req.body.password || "").trim();
+  const role = String(req.body.role || "").trim();
+  if (!name || !email || !password || !role) return res.status(400).json({ error: "이름, 이메일, 비밀번호, 권한은 필수입니다." });
+  if (!permissions[role]) return res.status(400).json({ error: "없는 권한입니다." });
+  const users = readUsers();
+  if (users.some((user) => user.email.toLowerCase() === email)) return res.status(409).json({ error: "이미 등록된 이메일입니다." });
+  const user = { id: crypto.randomUUID(), name, email, password, role };
+  users.push(user);
+  writeUsers(users);
+  const store = readStore();
+  addLog(store, req.user, `${name} 사용자를 ${permissions[role].label} 권한으로 등록했습니다.`);
+  writeStore(store);
+  res.status(201).json({ user: publicUser(user) });
+});
+
+app.post("/api/roles", requireAuth, requirePermission("managePermissions"), (req, res) => {
+  const permissions = readPermissions();
+  const role = String(req.body.role || "").trim();
+  const label = String(req.body.label || "").trim();
+  if (!role || !label) return res.status(400).json({ error: "권한 코드와 권한명은 필수입니다." });
+  if (permissions[role]) return res.status(409).json({ error: "이미 등록된 권한입니다." });
+  permissions[role] = {
+    label,
+    hint: String(req.body.hint || `${label} 권한입니다.`).trim(),
+    manageScores: Boolean(req.body.manageScores),
+    manageBooks: Boolean(req.body.manageBooks),
+    manageHistory: Boolean(req.body.manageHistory),
+    managePermissions: Boolean(req.body.managePermissions),
+  };
+  writePermissions(permissions);
+  const store = readStore();
+  addLog(store, req.user, `${label} 권한을 등록했습니다.`);
+  writeStore(store);
+  res.status(201).json({ permissions });
 });
 
 app.post("/api/scores", requireAuth, requirePermission("manageScores"), upload.single("scoreFile"), (req, res) => {
@@ -377,11 +419,34 @@ app.post("/api/scores", requireAuth, requirePermission("manageScores"), upload.s
   res.status(201).json(score);
 });
 
+app.patch("/api/scores/:id", requireAuth, requirePermission("manageScores"), upload.single("scoreFile"), (req, res) => {
+  const store = readStore();
+  const score = store.scores.find((item) => item.id === req.params.id);
+  if (!score) return res.status(404).json({ error: "악보를 찾을 수 없습니다." });
+  score.title = req.body.title || score.title;
+  score.date = req.body.date || score.date;
+  score.service = req.body.service || "";
+  score.weekSlot = req.body.weekSlot || "current";
+  score.bookTitle = req.body.bookTitle || "";
+  score.page = req.body.page || "";
+  score.part = req.body.part || score.part || "합창";
+  score.version = req.body.version || "";
+  score.preview = req.body.preview || "";
+  score.access = req.body.access || "all";
+  if (req.file) {
+    score.file = req.file.originalname;
+    score.fileUrl = `/uploads/${req.file.filename}`;
+  }
+  addLog(store, req.user, `찬양곡 "${score.title}"을 수정했습니다.`);
+  writeStore(store);
+  res.json(score);
+});
+
 app.delete("/api/scores/:id", requireAuth, requirePermission("manageScores"), (req, res) => {
   const store = readStore();
   const score = store.scores.find((item) => item.id === req.params.id);
   store.scores = store.scores.filter((item) => item.id !== req.params.id);
-  if (score) addLog(store, req.user, `찬양곡 "${score.title}" 항목을 삭제했습니다.`);
+  if (score) addLog(store, req.user, `찬양곡 "${score.title}"을 삭제했습니다.`);
   writeStore(store);
   res.json({ ok: true });
 });
@@ -397,50 +462,56 @@ app.post("/api/download-log/:id", requireAuth, (req, res) => {
 
 app.post("/api/books", requireAuth, requirePermission("manageBooks"), (req, res) => {
   const store = readStore();
-  const book = {
-    id: crypto.randomUUID(),
-    title: req.body.title,
-    stock: Number(req.body.stock || 0),
-    threshold: Number(req.body.threshold || 0),
-    songs: String(req.body.songs || "")
-      .split(",")
-      .map((song) => song.trim())
-      .filter(Boolean),
-  };
+  const code = String(req.body.code || `book-${crypto.randomUUID()}`).trim();
+  if (findBook(store, code)) return res.status(409).json({ error: "이미 등록된 찬양집입니다." });
+  const book = { code, id: code, title: req.body.title, stock: Number(req.body.stock || 0), threshold: Number(req.body.threshold || 0), songs: [] };
   store.books.unshift(book);
   addLog(store, req.user, `찬양집 "${book.title}"을 등록했습니다.`);
   writeStore(store);
   res.status(201).json(book);
 });
 
-app.patch("/api/books/:id/stock", requireAuth, requirePermission("manageBooks"), (req, res) => {
+app.patch("/api/books/:code/stock", requireAuth, requirePermission("manageBooks"), (req, res) => {
   const store = readStore();
-  const book = store.books.find((item) => item.id === req.params.id);
+  const book = findBook(store, req.params.code);
   if (!book) return res.status(404).json({ error: "찬양집을 찾을 수 없습니다." });
-  book.stock = Math.max(0, Number(book.stock) + Number(req.body.delta || 0));
-  addLog(store, req.user, `"${book.title}" 재고를 ${book.stock}권으로 수정했습니다.`);
+  if (req.body.stock !== undefined) {
+    book.stock = Math.max(0, Number(req.body.stock || 0));
+  } else {
+    book.stock = Math.max(0, Number(book.stock) + Number(req.body.delta || 0));
+  }
+  addLog(store, req.user, `"${book.title}" 보유 권수를 ${book.stock}권으로 수정했습니다.`);
   writeStore(store);
   res.json(book);
 });
 
-app.delete("/api/books/:id", requireAuth, requirePermission("manageBooks"), (req, res) => {
+app.patch("/api/books/:code/songs", requireAuth, requirePermission("manageBooks"), (req, res) => {
   const store = readStore();
-  const book = store.books.find((item) => item.id === req.params.id);
-  store.books = store.books.filter((item) => item.id !== req.params.id);
-  if (book) addLog(store, req.user, `찬양집 "${book.title}" 항목을 삭제했습니다.`);
+  const book = findBook(store, req.params.code);
+  if (!book) return res.status(404).json({ error: "찬양집을 찾을 수 없습니다." });
+  book.songs = Array.isArray(req.body.songs) ? req.body.songs.map(normalizeBookSong).filter((song) => song.seq && song.title) : [];
+  const seqSet = new Set();
+  for (const song of book.songs) {
+    if (seqSet.has(song.seq)) return res.status(400).json({ error: "같은 찬양집 안에서 seq가 중복될 수 없습니다." });
+    seqSet.add(song.seq);
+  }
+  addLog(store, req.user, `"${book.title}" 수록곡 목차를 ${book.songs.length}곡으로 수정했습니다.`);
+  writeStore(store);
+  res.json(book);
+});
+
+app.delete("/api/books/:code", requireAuth, requirePermission("manageBooks"), (req, res) => {
+  const store = readStore();
+  const book = findBook(store, req.params.code);
+  store.books = store.books.filter((item) => item.code !== req.params.code && item.id !== req.params.code);
+  if (book) addLog(store, req.user, `찬양집 "${book.title}"을 삭제했습니다.`);
   writeStore(store);
   res.json({ ok: true });
 });
 
 app.post("/api/history", requireAuth, requirePermission("manageHistory"), (req, res) => {
   const store = readStore();
-  const row = {
-    id: crypto.randomUUID(),
-    title: req.body.title,
-    date: req.body.date,
-    service: req.body.service || "",
-    media: req.body.media || "",
-  };
+  const row = { id: crypto.randomUUID(), title: req.body.title, date: req.body.date, service: req.body.service || "", media: req.body.media || "" };
   store.history.unshift(row);
   addLog(store, req.user, `찬양 이력 "${row.title}"을 등록했습니다.`);
   writeStore(store);
@@ -451,7 +522,7 @@ app.delete("/api/history/:id", requireAuth, requirePermission("manageHistory"), 
   const store = readStore();
   const row = store.history.find((item) => item.id === req.params.id);
   store.history = store.history.filter((item) => item.id !== req.params.id);
-  if (row) addLog(store, req.user, `찬양 이력 "${row.title}" 항목을 삭제했습니다.`);
+  if (row) addLog(store, req.user, `찬양 이력 "${row.title}"을 삭제했습니다.`);
   writeStore(store);
   res.json({ ok: true });
 });
@@ -459,14 +530,13 @@ app.delete("/api/history/:id", requireAuth, requirePermission("manageHistory"), 
 app.post("/api/reset-demo", requireAuth, requirePermission("managePermissions"), (req, res) => {
   writeStore(demoStore);
   writeUsers(defaultUsers);
+  writePermissions(defaultPermissions);
   writeOutbox([]);
   res.json({ ok: true });
 });
 
 if (require.main === module) {
-  app.listen(PORT, () => {
-    console.log(`Choir asset system running at http://localhost:${PORT}`);
-  });
+  app.listen(PORT, () => console.log(`Choir asset system running at http://localhost:${PORT}`));
 }
 
 module.exports = app;
