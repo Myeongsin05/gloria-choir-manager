@@ -586,7 +586,7 @@ function formData(form) {
 function resetForm(form) {
   form.reset();
   delete form.dataset.editingScoreId;
-  form.classList.add("hidden");
+  if (form.id === "scoreForm") form.classList.add("hidden");
 }
 
 function resetLoggedOutScreen() {
@@ -595,10 +595,9 @@ function resetLoggedOutScreen() {
   bookMode = "list";
   permissionMode = "users";
   $all("form").forEach((form) => form.reset());
-  $all(".editor").forEach((form) => {
-    delete form.dataset.editingScoreId;
-    form.classList.add("hidden");
-  });
+  $all("form").forEach((form) => delete form.dataset.editingScoreId);
+  const scoreForm = $("#scoreForm");
+  if (scoreForm) scoreForm.classList.add("hidden");
   ["weeklyCardList", "scoreList", "bookList", "historyList", "historyStats", "userRoleList", "permissionMatrix", "activityLog"].forEach((id) => {
     const element = $(`#${id}`);
     if (element) element.innerHTML = "";
