@@ -1,4 +1,4 @@
-﻿const crypto = require("crypto");
+const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const express = require("express");
@@ -13,6 +13,12 @@ const STORE_PATH = path.join(DATA_DIR, "store.json");
 const USERS_PATH = path.join(DATA_DIR, "users.json");
 const PERMISSIONS_PATH = path.join(DATA_DIR, "permissions.json");
 const OUTBOX_PATH = path.join(DATA_DIR, "mail-outbox.json");
+
+const SUPABASE_URL = (process.env.SUPABASE_URL || "").replace(/\/$/, "");
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+const SUPABASE_STORAGE_BUCKET = process.env.SUPABASE_STORAGE_BUCKET || "score-files";
+const USE_SUPABASE = Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY);
+const SESSION_SECRET = process.env.SESSION_SECRET || SUPABASE_SERVICE_ROLE_KEY || "local-dev-session-secret";
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
@@ -111,10 +117,53 @@ const demoStore = {
     { id: "history-001", title: "은혜 아니면", date: "2026-06-28", service: "주일 2부 예배", media: "https://www.youtube.com/" },
     { id: "history-002", title: "주 하나님 지으신 모든 세계", date: "2026-06-21", service: "주일 3부 예배", media: "" },
   ],
-  logs: [{ id: "log-001", at: new Date().toISOString(), actor: "시스템", action: "로컬 서버 데모 데이터가 준비되었습니다." }],
+  logs: [{ id: "log-001", at: new Date().toISOString(), actor: "시스템", action: "데모 데이터가 준비되었습니다." }],
 };
 
-const sessions = new Map();
+function asyncRoute(handler) {
+  return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
+}
+
+async function supabaseFetch(endpoint, options = {}) {
+  const response = await fetch(`${SUPABASE_URL}${endpoint}`, {
+    ...options,
+    headers: {
+      apikey: SUPABASE_SERVICE_ROLE_KEY,
+      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+      ...(options.headers || {}),
+    },
+  });
+  const text = await response.text();
+  const payload = text ? JSON.parse(text) : null;
+  if (!response.ok) {
+    const message = payload?.message || payload?.error || response.statusText;
+    throw new Error(`Supabase 요청 실패: ${message}`);
+  }
+  return payload;
+}
+
+async function readKv(key, fallback, filePath) {
+  if (!USE_SUPABASE) return readJson(filePath, fallback);
+  const rows = await supabaseFetch(`/rest/v1/app_kv?key=eq.${encodeURIComponent(key)}&select=value&limit=1`);
+  if (rows.length) return rows[0].value;
+  await writeKv(key, fallback, filePath);
+  return fallback;
+}
+
+async function writeKv(key, value, filePath) {
+  if (!USE_SUPABASE) {
+    writeJson(filePath, value);
+    return;
+  }
+  await supabaseFetch("/rest/v1/app_kv", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Prefer: "resolution=merge-duplicates",
+    },
+    body: JSON.stringify([{ key, value, mod_date: new Date().toISOString() }]),
+  });
+}
 
 function readJson(filePath, fallback) {
   if (!fs.existsSync(filePath)) writeJson(filePath, fallback);
@@ -125,14 +174,17 @@ function writeJson(filePath, value) {
   fs.writeFileSync(filePath, JSON.stringify(value, null, 2), "utf8");
 }
 
-function readStore() {
-  const store = readJson(STORE_PATH, demoStore);
+async function readStore() {
+  const store = await readKv("store", demoStore, STORE_PATH);
   store.books = (store.books || []).map(normalizeBook);
+  store.scores = store.scores || [];
+  store.history = store.history || [];
+  store.logs = store.logs || [];
   return store;
 }
 
-function writeStore(store) {
-  writeJson(STORE_PATH, store);
+async function writeStore(store) {
+  await writeKv("store", store, STORE_PATH);
 }
 
 function normalizeBook(book) {
@@ -145,7 +197,7 @@ function normalizeBook(book) {
   };
 }
 
-function normalizeBookSong(song, index) {
+function normalizeBookSong(song, index = 0) {
   if (typeof song === "string") {
     return { seq: String(index + 1).padStart(3, "0"), title: song, page: "", preview: "" };
   }
@@ -161,17 +213,17 @@ function findBook(store, code) {
   return store.books.find((item) => item.code === code || item.id === code);
 }
 
-function readPermissions() {
-  return readJson(PERMISSIONS_PATH, defaultPermissions);
+async function readPermissions() {
+  return readKv("permissions", defaultPermissions, PERMISSIONS_PATH);
 }
 
-function writePermissions(permissions) {
-  writeJson(PERMISSIONS_PATH, permissions);
+async function writePermissions(permissions) {
+  await writeKv("permissions", permissions, PERMISSIONS_PATH);
 }
 
-function readUsers() {
-  const users = readJson(USERS_PATH, defaultUsers);
-  const permissions = readPermissions();
+async function readUsers() {
+  const users = await readKv("users", defaultUsers, USERS_PATH);
+  const permissions = await readPermissions();
   let changed = false;
   const normalized = users
     .filter((user) => user.email !== "director@choir.local")
@@ -183,24 +235,24 @@ function readUsers() {
       return user;
     });
   if (normalized.length !== users.length) changed = true;
-  if (changed) writeUsers(normalized);
+  if (changed) await writeUsers(normalized);
   return normalized;
 }
 
-function writeUsers(users) {
-  writeJson(USERS_PATH, users);
+async function writeUsers(users) {
+  await writeKv("users", users, USERS_PATH);
 }
 
-function readOutbox() {
-  return readJson(OUTBOX_PATH, []);
+async function readOutbox() {
+  return readKv("outbox", [], OUTBOX_PATH);
 }
 
-function writeOutbox(messages) {
-  writeJson(OUTBOX_PATH, messages);
+async function writeOutbox(messages) {
+  await writeKv("outbox", messages, OUTBOX_PATH);
 }
 
-function addLog(store, user, action) {
-  const permissions = readPermissions();
+async function addLog(store, user, action) {
+  const permissions = await readPermissions();
   const role = user && permissions[user.role] ? user.role : "officer";
   store.logs.unshift({
     id: crypto.randomUUID(),
@@ -224,27 +276,46 @@ function parseCookies(req) {
   );
 }
 
-function publicUser(user) {
-  const permissions = readPermissions();
+function signSession(userId) {
+  const payload = Buffer.from(JSON.stringify({ userId, exp: Date.now() + 8 * 60 * 60 * 1000 })).toString("base64url");
+  const signature = crypto.createHmac("sha256", SESSION_SECRET).update(payload).digest("base64url");
+  return `${payload}.${signature}`;
+}
+
+function verifySession(token) {
+  if (!token || !token.includes(".")) return null;
+  const [payload, signature] = token.split(".");
+  const expected = crypto.createHmac("sha256", SESSION_SECRET).update(payload).digest("base64url");
+  if (!crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) return null;
+  const session = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+  if (!session.userId || Date.now() > session.exp) return null;
+  return session.userId;
+}
+
+async function publicUser(user) {
+  const permissions = await readPermissions();
   const role = permissions[user.role] ? user.role : "officer";
   return { id: user.id, name: user.name, email: user.email, role, permissions: permissions[role] };
 }
 
-function requireAuth(req, res, next) {
-  const sid = parseCookies(req).sid;
-  const userId = sid && sessions.get(sid);
-  const user = readUsers().find((item) => item.id === userId);
-  if (!user) return res.status(401).json({ error: "로그인이 필요합니다." });
-  req.user = user;
-  next();
+async function requireAuth(req, res, next) {
+  try {
+    const userId = verifySession(parseCookies(req).sid);
+    const user = userId && (await readUsers()).find((item) => item.id === userId);
+    if (!user) return res.status(401).json({ error: "로그인이 필요합니다." });
+    req.user = user;
+    next();
+  } catch (error) {
+    next(error);
+  }
 }
 
 function requirePermission(permission) {
-  return (req, res, next) => {
-    const permissions = readPermissions();
+  return asyncRoute(async (req, res, next) => {
+    const permissions = await readPermissions();
     if (!permissions[req.user.role]?.[permission]) return res.status(403).json({ error: "현재 역할에는 권한이 없습니다." });
     next();
-  };
+  });
 }
 
 function canAccessScore(user, score) {
@@ -257,8 +328,8 @@ function createTemporaryPassword() {
   return `choir-${crypto.randomBytes(3).toString("hex")}`;
 }
 
-function recordPasswordMail(user, temporaryPassword) {
-  const outbox = readOutbox();
+async function recordPasswordMail(user, temporaryPassword) {
+  const outbox = await readOutbox();
   outbox.unshift({
     id: crypto.randomUUID(),
     to: user.email,
@@ -268,7 +339,31 @@ function recordPasswordMail(user, temporaryPassword) {
     at: new Date().toISOString(),
     delivery: "local-outbox",
   });
-  writeOutbox(outbox.slice(0, 50));
+  await writeOutbox(outbox.slice(0, 50));
+}
+
+async function uploadScoreFile(file) {
+  if (!file) return { file: "", fileUrl: "" };
+  if (!USE_SUPABASE) return { file: file.originalname, fileUrl: `/uploads/${file.filename}` };
+
+  const extension = path.extname(file.originalname).toLowerCase();
+  const safeBase = path.basename(file.originalname, extension).replace(/[^a-zA-Z0-9가-힣_-]/g, "_").slice(0, 80);
+  const objectPath = `scores/${Date.now()}-${crypto.randomUUID()}-${safeBase}${extension}`;
+  const body = fs.readFileSync(file.path);
+
+  await supabaseFetch(`/storage/v1/object/${SUPABASE_STORAGE_BUCKET}/${encodeURIComponent(objectPath).replace(/%2F/g, "/")}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": file.mimetype || "application/octet-stream",
+      "x-upsert": "false",
+    },
+    body,
+  });
+
+  return {
+    file: file.originalname,
+    fileUrl: `${SUPABASE_URL}/storage/v1/object/public/${SUPABASE_STORAGE_BUCKET}/${objectPath}`,
+  };
 }
 
 const storage = multer.diskStorage({
@@ -290,249 +385,334 @@ app.use(express.json());
 app.use("/uploads", requireAuth, express.static(UPLOAD_DIR));
 app.use(express.static(ROOT));
 
-app.post("/api/login", (req, res) => {
-  const email = String(req.body.email || "").trim().toLowerCase();
-  const password = String(req.body.password || "");
-  const user = readUsers().find((item) => item.email.toLowerCase() === email);
-  if (!user) return res.status(401).json({ code: "LOGIN_EMAIL_NOT_FOUND", error: "등록되지 않은 아이디입니다." });
-  if (user.password !== password) return res.status(401).json({ code: "LOGIN_PASSWORD_MISMATCH", error: "비밀번호가 일치하지 않습니다." });
-  const sid = crypto.randomUUID();
-  sessions.set(sid, user.id);
-  res.setHeader("Set-Cookie", `sid=${encodeURIComponent(sid)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=28800`);
-  const store = readStore();
-  addLog(store, user, "로그인했습니다.");
-  writeStore(store);
-  res.json({ user: publicUser(user) });
-});
+app.post(
+  "/api/login",
+  asyncRoute(async (req, res) => {
+    const email = String(req.body.email || "").trim().toLowerCase();
+    const password = String(req.body.password || "");
+    const user = (await readUsers()).find((item) => item.email.toLowerCase() === email);
+    if (!user) return res.status(401).json({ code: "LOGIN_EMAIL_NOT_FOUND", error: "등록되지 않은 아이디입니다." });
+    if (user.password !== password) return res.status(401).json({ code: "LOGIN_PASSWORD_MISMATCH", error: "비밀번호가 일치하지 않습니다." });
+    res.setHeader("Set-Cookie", `sid=${encodeURIComponent(signSession(user.id))}; HttpOnly; SameSite=Lax; Path=/; Max-Age=28800`);
+    const store = await readStore();
+    await addLog(store, user, "로그인했습니다.");
+    await writeStore(store);
+    res.json({ user: await publicUser(user) });
+  }),
+);
 
 app.post("/api/logout", requireAuth, (req, res) => {
-  const sid = parseCookies(req).sid;
-  sessions.delete(sid);
   res.setHeader("Set-Cookie", "sid=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0");
   res.json({ ok: true });
 });
 
-app.post("/api/password-reset", (req, res) => {
-  const email = String(req.body.email || "").trim().toLowerCase();
-  const users = readUsers();
-  const user = users.find((item) => item.email.toLowerCase() === email);
-  if (!user) return res.status(404).json({ error: "등록된 이메일을 찾을 수 없습니다." });
-  const temporaryPassword = createTemporaryPassword();
-  user.password = temporaryPassword;
-  writeUsers(users);
-  recordPasswordMail(user, temporaryPassword);
-  const store = readStore();
-  addLog(store, user, "임시 비밀번호를 요청했습니다.");
-  writeStore(store);
-  res.json({ ok: true, message: "임시 비밀번호를 등록된 이메일로 전송했습니다.", delivery: "local-outbox" });
-});
+app.post(
+  "/api/password-reset",
+  asyncRoute(async (req, res) => {
+    const email = String(req.body.email || "").trim().toLowerCase();
+    const users = await readUsers();
+    const user = users.find((item) => item.email.toLowerCase() === email);
+    if (!user) return res.status(404).json({ error: "등록된 이메일을 찾을 수 없습니다." });
+    const temporaryPassword = createTemporaryPassword();
+    user.password = temporaryPassword;
+    await writeUsers(users);
+    await recordPasswordMail(user, temporaryPassword);
+    const store = await readStore();
+    await addLog(store, user, "임시 비밀번호를 요청했습니다.");
+    await writeStore(store);
+    res.json({ ok: true, message: "임시 비밀번호를 등록된 이메일로 전송했습니다.", delivery: "local-outbox" });
+  }),
+);
 
-app.get("/api/state", requireAuth, (req, res) => {
-  const store = readStore();
-  const permissions = readPermissions();
-  res.json({
-    user: publicUser(req.user),
-    permissions,
-    users: readUsers().map(publicUser),
-    scores: store.scores.filter((score) => canAccessScore(req.user, score)),
-    books: store.books,
-    history: store.history,
-    logs: store.logs,
-  });
-});
+app.get(
+  "/api/state",
+  requireAuth,
+  asyncRoute(async (req, res) => {
+    const store = await readStore();
+    const permissions = await readPermissions();
+    const users = await readUsers();
+    res.json({
+      user: await publicUser(req.user),
+      permissions,
+      users: await Promise.all(users.map(publicUser)),
+      scores: store.scores.filter((score) => canAccessScore(req.user, score)),
+      books: store.books,
+      history: store.history,
+      logs: store.logs,
+    });
+  }),
+);
 
-app.patch("/api/users/:id/role", requireAuth, requirePermission("managePermissions"), (req, res) => {
-  const permissions = readPermissions();
-  const nextRole = req.body.role;
-  if (!permissions[nextRole]) return res.status(400).json({ error: "없는 역할입니다." });
-  const users = readUsers();
-  const target = users.find((item) => item.id === req.params.id);
-  if (!target) return res.status(404).json({ error: "사용자를 찾을 수 없습니다." });
-  target.role = nextRole;
-  writeUsers(users);
-  const store = readStore();
-  addLog(store, req.user, `${target.name} 사용자의 역할을 ${permissions[nextRole].label}(으)로 변경했습니다.`);
-  writeStore(store);
-  res.json({ user: publicUser(target) });
-});
+app.patch(
+  "/api/users/:id/role",
+  requireAuth,
+  requirePermission("managePermissions"),
+  asyncRoute(async (req, res) => {
+    const permissions = await readPermissions();
+    const nextRole = req.body.role;
+    if (!permissions[nextRole]) return res.status(400).json({ error: "없는 역할입니다." });
+    const users = await readUsers();
+    const target = users.find((item) => item.id === req.params.id);
+    if (!target) return res.status(404).json({ error: "사용자를 찾을 수 없습니다." });
+    target.role = nextRole;
+    await writeUsers(users);
+    const store = await readStore();
+    await addLog(store, req.user, `${target.name} 사용자의 역할을 ${permissions[nextRole].label}(으)로 변경했습니다.`);
+    await writeStore(store);
+    res.json({ user: await publicUser(target) });
+  }),
+);
 
-app.post("/api/users", requireAuth, requirePermission("managePermissions"), (req, res) => {
-  const permissions = readPermissions();
-  const name = String(req.body.name || "").trim();
-  const email = String(req.body.email || "").trim().toLowerCase();
-  const password = String(req.body.password || "").trim();
-  const role = String(req.body.role || "").trim();
-  if (!name || !email || !password || !role) return res.status(400).json({ error: "이름, 이메일, 비밀번호, 권한은 필수입니다." });
-  if (!permissions[role]) return res.status(400).json({ error: "없는 권한입니다." });
-  const users = readUsers();
-  if (users.some((user) => user.email.toLowerCase() === email)) return res.status(409).json({ error: "이미 등록된 이메일입니다." });
-  const user = { id: crypto.randomUUID(), name, email, password, role };
-  users.push(user);
-  writeUsers(users);
-  const store = readStore();
-  addLog(store, req.user, `${name} 사용자를 ${permissions[role].label} 권한으로 등록했습니다.`);
-  writeStore(store);
-  res.status(201).json({ user: publicUser(user) });
-});
+app.post(
+  "/api/users",
+  requireAuth,
+  requirePermission("managePermissions"),
+  asyncRoute(async (req, res) => {
+    const permissions = await readPermissions();
+    const name = String(req.body.name || "").trim();
+    const email = String(req.body.email || "").trim().toLowerCase();
+    const password = String(req.body.password || "").trim();
+    const role = String(req.body.role || "").trim();
+    if (!name || !email || !password || !role) return res.status(400).json({ error: "이름, 이메일, 비밀번호, 권한은 필수입니다." });
+    if (!permissions[role]) return res.status(400).json({ error: "없는 권한입니다." });
+    const users = await readUsers();
+    if (users.some((user) => user.email.toLowerCase() === email)) return res.status(409).json({ error: "이미 등록된 이메일입니다." });
+    const user = { id: crypto.randomUUID(), name, email, password, role };
+    users.push(user);
+    await writeUsers(users);
+    const store = await readStore();
+    await addLog(store, req.user, `${name} 사용자를 ${permissions[role].label} 권한으로 등록했습니다.`);
+    await writeStore(store);
+    res.status(201).json({ user: await publicUser(user) });
+  }),
+);
 
-app.post("/api/roles", requireAuth, requirePermission("managePermissions"), (req, res) => {
-  const permissions = readPermissions();
-  const role = String(req.body.role || "").trim();
-  const label = String(req.body.label || "").trim();
-  if (!role || !label) return res.status(400).json({ error: "권한 코드와 권한명은 필수입니다." });
-  if (permissions[role]) return res.status(409).json({ error: "이미 등록된 권한입니다." });
-  permissions[role] = {
-    label,
-    hint: String(req.body.hint || `${label} 권한입니다.`).trim(),
-    manageScores: Boolean(req.body.manageScores),
-    manageBooks: Boolean(req.body.manageBooks),
-    manageHistory: Boolean(req.body.manageHistory),
-    managePermissions: Boolean(req.body.managePermissions),
-  };
-  writePermissions(permissions);
-  const store = readStore();
-  addLog(store, req.user, `${label} 권한을 등록했습니다.`);
-  writeStore(store);
-  res.status(201).json({ permissions });
-});
+app.post(
+  "/api/roles",
+  requireAuth,
+  requirePermission("managePermissions"),
+  asyncRoute(async (req, res) => {
+    const permissions = await readPermissions();
+    const role = String(req.body.role || "").trim();
+    const label = String(req.body.label || "").trim();
+    if (!role || !label) return res.status(400).json({ error: "권한 코드와 권한명은 필수입니다." });
+    if (permissions[role]) return res.status(409).json({ error: "이미 등록된 권한입니다." });
+    permissions[role] = {
+      label,
+      hint: String(req.body.hint || `${label} 권한입니다.`).trim(),
+      manageScores: Boolean(req.body.manageScores),
+      manageBooks: Boolean(req.body.manageBooks),
+      manageHistory: Boolean(req.body.manageHistory),
+      managePermissions: Boolean(req.body.managePermissions),
+    };
+    await writePermissions(permissions);
+    const store = await readStore();
+    await addLog(store, req.user, `${label} 권한을 등록했습니다.`);
+    await writeStore(store);
+    res.status(201).json({ permissions });
+  }),
+);
 
-app.post("/api/scores", requireAuth, requirePermission("manageScores"), upload.single("scoreFile"), (req, res) => {
-  const store = readStore();
-  const score = {
-    id: crypto.randomUUID(),
-    title: req.body.title,
-    date: req.body.date,
-    service: req.body.service || "",
-    weekSlot: req.body.weekSlot || "current",
-    bookTitle: req.body.bookTitle || "",
-    page: req.body.page || "",
-    part: req.body.part || "합창",
-    file: req.file ? req.file.originalname : req.body.file || "",
-    fileUrl: req.file ? `/uploads/${req.file.filename}` : "",
-    version: req.body.version || "v1.0",
-    preview: req.body.preview || "",
-    access: req.body.access || "all",
-  };
-  store.scores.unshift(score);
-  addLog(store, req.user, `찬양곡 "${score.title}"을 등록했습니다.`);
-  writeStore(store);
-  res.status(201).json(score);
-});
+app.post(
+  "/api/scores",
+  requireAuth,
+  requirePermission("manageScores"),
+  upload.single("scoreFile"),
+  asyncRoute(async (req, res) => {
+    const uploaded = await uploadScoreFile(req.file);
+    const store = await readStore();
+    const score = {
+      id: crypto.randomUUID(),
+      title: req.body.title,
+      date: req.body.date,
+      service: req.body.service || "",
+      weekSlot: req.body.weekSlot || "current",
+      bookTitle: req.body.bookTitle || "",
+      page: req.body.page || "",
+      part: req.body.part || "합창",
+      file: uploaded.file || req.body.file || "",
+      fileUrl: uploaded.fileUrl,
+      version: req.body.version || "v1.0",
+      preview: req.body.preview || "",
+      access: req.body.access || "all",
+    };
+    store.scores.unshift(score);
+    await addLog(store, req.user, `찬양곡 "${score.title}"을 등록했습니다.`);
+    await writeStore(store);
+    res.status(201).json(score);
+  }),
+);
 
-app.patch("/api/scores/:id", requireAuth, requirePermission("manageScores"), upload.single("scoreFile"), (req, res) => {
-  const store = readStore();
-  const score = store.scores.find((item) => item.id === req.params.id);
-  if (!score) return res.status(404).json({ error: "악보를 찾을 수 없습니다." });
-  score.title = req.body.title || score.title;
-  score.date = req.body.date || score.date;
-  score.service = req.body.service || "";
-  score.weekSlot = req.body.weekSlot || "current";
-  score.bookTitle = req.body.bookTitle || "";
-  score.page = req.body.page || "";
-  score.part = req.body.part || score.part || "합창";
-  score.version = req.body.version || "";
-  score.preview = req.body.preview || "";
-  score.access = req.body.access || "all";
-  if (req.file) {
-    score.file = req.file.originalname;
-    score.fileUrl = `/uploads/${req.file.filename}`;
-  }
-  addLog(store, req.user, `찬양곡 "${score.title}"을 수정했습니다.`);
-  writeStore(store);
-  res.json(score);
-});
+app.patch(
+  "/api/scores/:id",
+  requireAuth,
+  requirePermission("manageScores"),
+  upload.single("scoreFile"),
+  asyncRoute(async (req, res) => {
+    const store = await readStore();
+    const score = store.scores.find((item) => item.id === req.params.id);
+    if (!score) return res.status(404).json({ error: "악보를 찾을 수 없습니다." });
+    score.title = req.body.title || score.title;
+    score.date = req.body.date || score.date;
+    score.service = req.body.service || "";
+    score.weekSlot = req.body.weekSlot || "current";
+    score.bookTitle = req.body.bookTitle || "";
+    score.page = req.body.page || "";
+    score.part = req.body.part || score.part || "합창";
+    score.version = req.body.version || "";
+    score.preview = req.body.preview || "";
+    score.access = req.body.access || "all";
+    if (req.file) {
+      const uploaded = await uploadScoreFile(req.file);
+      score.file = uploaded.file;
+      score.fileUrl = uploaded.fileUrl;
+    }
+    await addLog(store, req.user, `찬양곡 "${score.title}"을 수정했습니다.`);
+    await writeStore(store);
+    res.json(score);
+  }),
+);
 
-app.delete("/api/scores/:id", requireAuth, requirePermission("manageScores"), (req, res) => {
-  const store = readStore();
-  const score = store.scores.find((item) => item.id === req.params.id);
-  store.scores = store.scores.filter((item) => item.id !== req.params.id);
-  if (score) addLog(store, req.user, `찬양곡 "${score.title}"을 삭제했습니다.`);
-  writeStore(store);
-  res.json({ ok: true });
-});
+app.delete(
+  "/api/scores/:id",
+  requireAuth,
+  requirePermission("manageScores"),
+  asyncRoute(async (req, res) => {
+    const store = await readStore();
+    const score = store.scores.find((item) => item.id === req.params.id);
+    store.scores = store.scores.filter((item) => item.id !== req.params.id);
+    if (score) await addLog(store, req.user, `찬양곡 "${score.title}"을 삭제했습니다.`);
+    await writeStore(store);
+    res.json({ ok: true });
+  }),
+);
 
-app.post("/api/download-log/:id", requireAuth, (req, res) => {
-  const store = readStore();
-  const score = store.scores.find((item) => item.id === req.params.id);
-  if (!score || !canAccessScore(req.user, score)) return res.status(404).json({ error: "악보를 찾을 수 없습니다." });
-  addLog(store, req.user, `악보 "${score.title}" 다운로드를 기록했습니다.`);
-  writeStore(store);
-  res.json({ ok: true });
-});
+app.post(
+  "/api/download-log/:id",
+  requireAuth,
+  asyncRoute(async (req, res) => {
+    const store = await readStore();
+    const score = store.scores.find((item) => item.id === req.params.id);
+    if (!score || !canAccessScore(req.user, score)) return res.status(404).json({ error: "악보를 찾을 수 없습니다." });
+    await addLog(store, req.user, `악보 "${score.title}" 다운로드를 기록했습니다.`);
+    await writeStore(store);
+    res.json({ ok: true });
+  }),
+);
 
-app.post("/api/books", requireAuth, requirePermission("manageBooks"), (req, res) => {
-  const store = readStore();
-  const code = String(req.body.code || `book-${crypto.randomUUID()}`).trim();
-  if (findBook(store, code)) return res.status(409).json({ error: "이미 등록된 찬양집입니다." });
-  const book = { code, id: code, title: req.body.title, stock: Number(req.body.stock || 0), threshold: Number(req.body.threshold || 0), songs: [] };
-  store.books.unshift(book);
-  addLog(store, req.user, `찬양집 "${book.title}"을 등록했습니다.`);
-  writeStore(store);
-  res.status(201).json(book);
-});
+app.post(
+  "/api/books",
+  requireAuth,
+  requirePermission("manageBooks"),
+  asyncRoute(async (req, res) => {
+    const store = await readStore();
+    const code = String(req.body.code || `book-${crypto.randomUUID()}`).trim();
+    if (findBook(store, code)) return res.status(409).json({ error: "이미 등록된 찬양집입니다." });
+    const book = { code, id: code, title: req.body.title, stock: Number(req.body.stock || 0), threshold: Number(req.body.threshold || 0), songs: [] };
+    store.books.unshift(book);
+    await addLog(store, req.user, `찬양집 "${book.title}"을 등록했습니다.`);
+    await writeStore(store);
+    res.status(201).json(book);
+  }),
+);
 
-app.patch("/api/books/:code/stock", requireAuth, requirePermission("manageBooks"), (req, res) => {
-  const store = readStore();
-  const book = findBook(store, req.params.code);
-  if (!book) return res.status(404).json({ error: "찬양집을 찾을 수 없습니다." });
-  if (req.body.stock !== undefined) {
-    book.stock = Math.max(0, Number(req.body.stock || 0));
-  } else {
-    book.stock = Math.max(0, Number(book.stock) + Number(req.body.delta || 0));
-  }
-  addLog(store, req.user, `"${book.title}" 보유 권수를 ${book.stock}권으로 수정했습니다.`);
-  writeStore(store);
-  res.json(book);
-});
+app.patch(
+  "/api/books/:code/stock",
+  requireAuth,
+  requirePermission("manageBooks"),
+  asyncRoute(async (req, res) => {
+    const store = await readStore();
+    const book = findBook(store, req.params.code);
+    if (!book) return res.status(404).json({ error: "찬양집을 찾을 수 없습니다." });
+    if (req.body.stock !== undefined) {
+      book.stock = Math.max(0, Number(req.body.stock || 0));
+    } else {
+      book.stock = Math.max(0, Number(book.stock) + Number(req.body.delta || 0));
+    }
+    await addLog(store, req.user, `"${book.title}" 보유 권수를 ${book.stock}권으로 수정했습니다.`);
+    await writeStore(store);
+    res.json(book);
+  }),
+);
 
-app.patch("/api/books/:code/songs", requireAuth, requirePermission("manageBooks"), (req, res) => {
-  const store = readStore();
-  const book = findBook(store, req.params.code);
-  if (!book) return res.status(404).json({ error: "찬양집을 찾을 수 없습니다." });
-  book.songs = Array.isArray(req.body.songs) ? req.body.songs.map(normalizeBookSong).filter((song) => song.seq && song.title) : [];
-  const seqSet = new Set();
-  for (const song of book.songs) {
-    if (seqSet.has(song.seq)) return res.status(400).json({ error: "같은 찬양집 안에서 seq가 중복될 수 없습니다." });
-    seqSet.add(song.seq);
-  }
-  addLog(store, req.user, `"${book.title}" 수록곡 목차를 ${book.songs.length}곡으로 수정했습니다.`);
-  writeStore(store);
-  res.json(book);
-});
+app.patch(
+  "/api/books/:code/songs",
+  requireAuth,
+  requirePermission("manageBooks"),
+  asyncRoute(async (req, res) => {
+    const store = await readStore();
+    const book = findBook(store, req.params.code);
+    if (!book) return res.status(404).json({ error: "찬양집을 찾을 수 없습니다." });
+    book.songs = Array.isArray(req.body.songs) ? req.body.songs.map(normalizeBookSong).filter((song) => song.seq && song.title) : [];
+    const seqSet = new Set();
+    for (const song of book.songs) {
+      if (seqSet.has(song.seq)) return res.status(400).json({ error: "같은 찬양집 안에서 seq가 중복될 수 없습니다." });
+      seqSet.add(song.seq);
+    }
+    await addLog(store, req.user, `"${book.title}" 수록곡 목차를 ${book.songs.length}곡으로 수정했습니다.`);
+    await writeStore(store);
+    res.json(book);
+  }),
+);
 
-app.delete("/api/books/:code", requireAuth, requirePermission("manageBooks"), (req, res) => {
-  const store = readStore();
-  const book = findBook(store, req.params.code);
-  store.books = store.books.filter((item) => item.code !== req.params.code && item.id !== req.params.code);
-  if (book) addLog(store, req.user, `찬양집 "${book.title}"을 삭제했습니다.`);
-  writeStore(store);
-  res.json({ ok: true });
-});
+app.delete(
+  "/api/books/:code",
+  requireAuth,
+  requirePermission("manageBooks"),
+  asyncRoute(async (req, res) => {
+    const store = await readStore();
+    const book = findBook(store, req.params.code);
+    store.books = store.books.filter((item) => item.code !== req.params.code && item.id !== req.params.code);
+    if (book) await addLog(store, req.user, `찬양집 "${book.title}"을 삭제했습니다.`);
+    await writeStore(store);
+    res.json({ ok: true });
+  }),
+);
 
-app.post("/api/history", requireAuth, requirePermission("manageHistory"), (req, res) => {
-  const store = readStore();
-  const row = { id: crypto.randomUUID(), title: req.body.title, date: req.body.date, service: req.body.service || "", media: req.body.media || "" };
-  store.history.unshift(row);
-  addLog(store, req.user, `찬양 이력 "${row.title}"을 등록했습니다.`);
-  writeStore(store);
-  res.status(201).json(row);
-});
+app.post(
+  "/api/history",
+  requireAuth,
+  requirePermission("manageHistory"),
+  asyncRoute(async (req, res) => {
+    const store = await readStore();
+    const row = { id: crypto.randomUUID(), title: req.body.title, date: req.body.date, service: req.body.service || "", media: req.body.media || "" };
+    store.history.unshift(row);
+    await addLog(store, req.user, `찬양 이력 "${row.title}"을 등록했습니다.`);
+    await writeStore(store);
+    res.status(201).json(row);
+  }),
+);
 
-app.delete("/api/history/:id", requireAuth, requirePermission("manageHistory"), (req, res) => {
-  const store = readStore();
-  const row = store.history.find((item) => item.id === req.params.id);
-  store.history = store.history.filter((item) => item.id !== req.params.id);
-  if (row) addLog(store, req.user, `찬양 이력 "${row.title}"을 삭제했습니다.`);
-  writeStore(store);
-  res.json({ ok: true });
-});
+app.delete(
+  "/api/history/:id",
+  requireAuth,
+  requirePermission("manageHistory"),
+  asyncRoute(async (req, res) => {
+    const store = await readStore();
+    const row = store.history.find((item) => item.id === req.params.id);
+    store.history = store.history.filter((item) => item.id !== req.params.id);
+    if (row) await addLog(store, req.user, `찬양 이력 "${row.title}"을 삭제했습니다.`);
+    await writeStore(store);
+    res.json({ ok: true });
+  }),
+);
 
-app.post("/api/reset-demo", requireAuth, requirePermission("managePermissions"), (req, res) => {
-  writeStore(demoStore);
-  writeUsers(defaultUsers);
-  writePermissions(defaultPermissions);
-  writeOutbox([]);
-  res.json({ ok: true });
+app.post(
+  "/api/reset-demo",
+  requireAuth,
+  requirePermission("managePermissions"),
+  asyncRoute(async (req, res) => {
+    await writeStore(demoStore);
+    await writeUsers(defaultUsers);
+    await writePermissions(defaultPermissions);
+    await writeOutbox([]);
+    res.json({ ok: true });
+  }),
+);
+
+app.use((error, req, res, next) => {
+  console.error(error);
+  res.status(500).json({ error: error.message || "서버 오류가 발생했습니다." });
 });
 
 if (require.main === module) {
